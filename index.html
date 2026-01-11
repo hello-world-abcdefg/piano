@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+<title>Ear Training</title>
+
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans  :wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js  "></script>
+
+<style>
+  body {
+    margin: 0;
+    background: #000;
+    font-family: 'Noto Sans', sans-serif;
+  }
+
+  #viewport {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  #game-wrapper {
+    width: 1600px;
+    margin: 0 auto;
+  }
+
+  @media (max-width: 900px) {
+    #game-wrapper {
+      transform-origin: top center;
+      transform: scale(var(--scale));
+    }
+  }
+
+  #game-container {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+</style>
+</head>
+
+<body>
+<div id="viewport">
+  <div id="game-wrapper">
+    <div id="game-container"></div>
+  </div>
+</div>
+
+<script>
+/* ========= Scaling ========= */
+function updateScale() {
+  const vw = window.innerWidth;
+  const scale = Math.min(vw / 1600, 1);
+  document.documentElement.style.setProperty('--scale', scale);
+}
+updateScale();
+window.addEventListener('resize', updateScale);
+
+/* ========= Basic Parameters ========= */
+const START_MIDI = 48;
+const KEY_COUNT = 61;
+
+// Solfège mapping (C=do, D=re...)
+const SOLFEGGE_MAP = {
+  0: 'do', 2: 're', 4: 'mi', 5: 'fa', 7: 'sol', 9: 'la', 11: 'si'
+};
+
+function midiToFreq(m) {
+  return 440 * Math.pow(2, (m - 69) / 12);
+}
+
+function playNote(m, ctx) {
+  const o = ctx.createOscillator();
+  const g = ctx.createGain();
+  o.frequency.value = midiToFreq(m);
+  g.gain.setValueAtTime(0.3, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.8);
+  o.connect(g);
+  g.connect(ctx.destination);
+  o.start();
+  o.stop(ctx.currentTime + 0.8);
+}
+
+function playChord(midis, ctx) {
+  midis.forEach(m => playNote(m, ctx));
+}
+
+/* ========= Phaser Configuration ========= */
+const GAME_WIDTH = 1600;
+const GAME_HEIGHT = 420;
+
+const config = {
+  type: Phaser.AUTO,
+  parent: 'game-container',
+  width: GAME_WIDTH,
+  height: GAME_HEIGHT,
+  backgroundColor: '#000',
+  scene: { create }
+};
+
+let audioContext;
+let mode = 1;
+let answerMidi = [];
+let lastClicked = null;
+let feedback;
+
+let keyObjects = new Map();
+let highlightRects = [];
+
+/* ⭐ New state variables */
+let hasQuestion = false;   // Whether a question has been generated
+let hasConfirmed = true;   // Whether answer has been confirmed (initially allow new questions)
+let modeButtons = [];      // ✅ Store mode button references for visual feedback
+
+function create() {
+  const s = this;
+
+  /* ===== Title ===== */
+  s.add.text(GAME_WIDTH / 2, 20, 'Ear Training', {
+    fontSize: '26px',
+    fill: '#fff'
+  }).setOrigin(0.5);
+
+  /* ===== Mode Selection ===== */
+  s.add.text(50, 60, 'Mode:', { fill: '#fff', fontSize: '18px' });
+
+  function modeButton(x, label, value) {
+    const btn = s.add.rectangle(x, 60, 30, 30, 0x4a4a4a)
+      .setInteractive()
+      .setStrokeStyle(2, 0xffffff);
+    s.add.text(x, 60, label, { fill: '#fff', fontSize: '16px' })
+      .setOrigin(0.5);
+    
+    // ✅ Store button reference with its value
+    modeButtons.push({ button: btn, value: value });
+    
+    btn.on('pointerdown', () => {
+      mode = value;
+      // ✅ Update visual state of all mode buttons
+      updateModeButtonStates();
+    });
+    
+    return btn;
+  }
+
+  modeButton(120, '1', 1);
+  modeButton(160, '2', 2);
+  modeButton(200, '3', 3);
+
+  // ✅ Initialize the visual state (mode 1 should be selected by default)
+  updateModeButtonStates();
+
+  /* ===== Buttons ===== */
+  function button(x, text, color, cb) {
+    const r = s.add.rectangle(x, 60, 100, 40, color)
+      .setInteractive()
+      .setStrokeStyle(2, 0xffffff);
+    s.add.text(x, 60, text, { fill: '#fff', fontSize: '16px' }).setOrigin(0.5);
+    r.on('pointerdown', cb);
+  }
+
+  /* ===== Generate Question ===== */
+  button(320, 'Play', 0x2ecc71, () => {
+    if (!audioContext) audioContext = new AudioContext();
+
+    // 🔒 Already has question but not confirmed → replay same question
+    if (hasQuestion && !hasConfirmed) {
+      playChord(answerMidi, audioContext);
+      return;
+    }
+
+    // ✅ Generate new question
+    answerMidi = [];
+    for (let i = 0; i < mode; i++) {
+      answerMidi.push(START_MIDI + Math.floor(Math.random() * KEY_COUNT));
+    }
+    answerMidi.sort((a, b) => a - b);
+
+    playChord(answerMidi, audioContext);
+
+    hasQuestion = true;
+    hasConfirmed = false;
+    lastClicked = null;
+    feedback.setText('');
+    clearHighlights();
+  });
+
+  /* ===== Confirm Answer ===== */
+  button(440, 'Confirm', 0xe74c3c, () => {
+    if (lastClicked === null) {
+      feedback.setText('Please click a piano key first');
+      return;
+    }
+
+    const correct = answerMidi.includes(lastClicked);
+    if (correct) {
+      // ✅ Show answer and highlight when correct
+      const names = answerMidi.map(m => {
+        const n = m % 12;
+        return SOLFEGGE_MAP[n] || (n === 1 ? '#do' : n === 3 ? '#re' : n === 6 ? '#fa' : n === 8 ? '#sol' : '#la');
+      }).join(', ');
+      feedback.setText(`✅ Correct! Answer: ${names}`);
+      highlightCorrectKeys(s);
+    } else {
+      const names = answerMidi.map(m => {
+        const n = m % 12;
+        return SOLFEGGE_MAP[n] || (n === 1 ? '#do' : n === 3 ? '#re' : n === 6 ? '#fa' : n === 8 ? '#sol' : '#la');
+      }).join(', ');
+      feedback.setText(`❌ Incorrect! Correct answer: ${names}`);
+      highlightCorrectKeys(s);
+    }
+
+    hasConfirmed = true; // 🔓 Unlock new question
+  });
+
+  feedback = s.add.text(GAME_WIDTH / 2, GAME_HEIGHT - 20, '', {
+    fontSize: '18px',
+    fill: '#fff'
+  }).setOrigin(0.5);
+
+  /* ===== Piano Keyboard ===== */
+  const whiteW = 24, whiteH = 180;
+  const blackW = whiteW * 0.6, blackH = whiteH * 0.6;
+  let x = 50, y = 110;
+  let whiteXs = [];
+
+  keyObjects.clear();
+
+  for (let i = 0; i < KEY_COUNT; i++) {
+    const midi = START_MIDI + i;
+    const n = midi % 12;
+    if ([1,3,6,8,10].includes(n)) continue;
+
+    const key = s.add.rectangle(x, y, whiteW, whiteH, 0xffffff)
+      .setOrigin(0,0)
+      .setStrokeStyle(1, 0xaaa)
+      .setInteractive();
+
+    keyObjects.set(midi, { key, x, y, width: whiteW, height: whiteH });
+
+    key.on('pointerdown', () => {
+      if (!audioContext) audioContext = new AudioContext();
+      playNote(midi, audioContext);
+      lastClicked = midi;
+    });
+
+    s.add.text(x + whiteW / 2, y + whiteH - 18, SOLFEGGE_MAP[n], {
+      fontSize: '12px',
+      fill: '#000'
+    }).setOrigin(0.5);
+
+    whiteXs[i] = x;
+    x += whiteW;
+  }
+
+  for (let i = 0; i < KEY_COUNT; i++) {
+    const midi = START_MIDI + i;
+    const n = midi % 12;
+    if (![1,3,6,8,10].includes(n)) continue;
+
+    const left = whiteXs[i - 1];
+    if (left == null) continue;
+
+    const bx = left + whiteW - blackW / 2;
+    const key = s.add.rectangle(bx, y, blackW, blackH, 0x000000)
+      .setOrigin(0,0)
+      .setDepth(10)
+      .setInteractive();
+
+    keyObjects.set(midi, { key, x: bx, y, width: blackW, height: blackH });
+
+    key.on('pointerdown', () => {
+      if (!audioContext) audioContext = new AudioContext();
+      playNote(midi, audioContext);
+      lastClicked = midi;
+    });
+  }
+
+  /* ===== Instructions (Bottom Left) ===== */
+  const instructions = [
+    'How to use:',
+    '1. Select mode (1/2/3 notes)',
+    '2. Click "Play" to hear the notes',
+    '3. Click piano keys to try and select your answer',
+    '4. Click "Confirm" to submit your answer',
+    '5. Red boxes will highlight the correct notes'
+  ];
+
+  // Create instructions in bottom left corner
+  let yPos = GAME_HEIGHT - 120; // Start 120px from bottom
+  instructions.forEach((line, index) => {
+    s.add.text(20, yPos + index * 20, line, {
+      fontSize: '14px',
+      fill: '#aaa',
+      fontFamily: 'Noto Sans'
+    });
+  });
+}
+
+// ✅ New function to update mode button visual states
+function updateModeButtonStates() {
+  modeButtons.forEach(btnObj => {
+    if (btnObj.value === mode) {
+      // Selected mode: darker color
+      btnObj.button.setFillStyle(0x2a2a2a);
+    } else {
+      // Unselected mode: normal color
+      btnObj.button.setFillStyle(0x4a4a4a);
+    }
+  });
+}
+
+/* ===== Highlight Correct Keys ===== */
+function highlightCorrectKeys(scene) {
+  clearHighlights();
+  answerMidi.forEach(midi => {
+    const k = keyObjects.get(midi);
+    if (!k) return;
+    const r = scene.add.rectangle(k.x, k.y, k.width, k.height)
+      .setOrigin(0,0)
+      .setStrokeStyle(2, 0xff0000)
+      .setFillStyle(0xff0000, 0)
+      .setDepth(20);
+    highlightRects.push(r);
+  });
+}
+
+function clearHighlights() {
+  highlightRects.forEach(r => r.destroy());
+  highlightRects = [];
+}
+
+new Phaser.Game(config);
+</script>
+</body>
+</html>
